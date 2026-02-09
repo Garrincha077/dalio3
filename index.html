@@ -783,12 +783,12 @@ const store = {
 };
 
 const G_IND = [
-  {id:'real_gdp',name:'Real GDP',unit:'% YoY',fred:'A191RL1Q225SBEA',def:2.4,
-   th:{bull:2.5,bear:1.0},desc:'BEA Quarterly',dir:'hb',w:1.2},
+  {id:'real_gdp',name:'Real GDP',unit:'% YoY',fred:'GDPC1',def:2.4,
+   th:{bull:2.5,bear:1.0},desc:'BEA Real GDP (FRED GDPC1)',dir:'hb',w:1.2},
   {id:'nominal_gdp',name:'Nominal GDP',unit:'% YoY',fred:'GDP',def:5.1,
    th:{bull:5.0,bear:3.0},desc:'FRED GDP',dir:'hb',w:0.8},
-  {id:'ism_pmi',name:'ISM Manufacturing PMI',unit:'Index',fred:null,def:52.6,
-   th:{bull:53.0,bear:47.0},desc:'Manual — ISM Report',dir:'hb',w:1.0},
+  {id:'ism_pmi',name:'ISM Manufacturing PMI',unit:'Index',fred:'NAPM',def:52.6,
+   th:{bull:53.0,bear:47.0},desc:'ISM PMI (FRED NAPM)',dir:'hb',w:1.0},
   {id:'ind_prod',name:'Industrial Production',unit:'% YoY',fred:'INDPRO',def:0.8,
    th:{bull:2.0,bear:-1.0},desc:'Fed Ind. Production',dir:'hb',w:0.9},
   {id:'new_orders',name:'New Mfg Orders',unit:'% YoY',fred:'AMTMNO',def:1.5,
@@ -817,7 +817,7 @@ const I_IND = [
   {id:'shelter',name:'Shelter CPI',unit:'% YoY',fred:'CUSR0000SAH1',def:4.0,
    th:{rise:5.5,fall:3.0},desc:'Lagging, persistent',w:0.8},
   {id:'misery',name:'Misery Index',unit:'UE+CPI',fred:null,def:6.8,
-   th:{rise:9.0,fall:5.5},desc:'Unemployment + CPI YoY',w:0.7},
+   th:{rise:9.0,fall:5.5},desc:'Derived: Unemployment + CPI YoY',w:0.7},
   {id:'ffr',name:'Federal Funds Rate',unit:'%',fred:'FEDFUNDS',def:4.50,
    th:{rise:4.5,fall:2.0},desc:'Fed policy rate',w:0.6},
 ];
@@ -1187,10 +1187,10 @@ async function fetchAllFRED(){
   document.getElementById('loadingOverlay').classList.add('active');
 
   // Categorize FRED series by how to process them
-  // YoY Monthly: need 13 observations to calculate (current/12-months-ago - 1)
+  // YoY Monthly: compute (latest vs same month 12 months ago)
   const yoyMonthly=['PAYEMS','INDPRO','AMTMNO','TEMPHELPS','TOTLL','CPIAUCSL','CES0500000003','CUSR0000SAH1','PCEPILFE'];
-  // YoY Quarterly: need 5 observations (current/4-quarters-ago - 1)
-  const yoyQuarterly=['GDP'];
+  // YoY Quarterly: compute (latest vs same quarter 4 quarters ago)
+  const yoyQuarterly=['GDP','GDPC1'];
   // Direct value: already in correct format (%, index, spread)
   // A191RL1Q225SBEA = QoQ annualized %, NFCI = index, FEDFUNDS = %, SAHMREALTIME = pp,
   // T10Y2Y = %, BAMLH0A0HYM2 = %, UNRATE = %
@@ -1208,22 +1208,68 @@ async function fetchAllFRED(){
 
   let f=0,errors=[],fetched=[];
 
+  const parseVal = (val) => {
+    const n = parseFloat(val);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  const latestObservation = (observations) => {
+    for (const obs of observations) {
+      const v = parseVal(obs.value);
+      if (v !== null) return obs;
+    }
+    return null;
+  };
+
+  const findObservationByDate = (observations, targetDate) => {
+    for (const obs of observations) {
+      if (obs.date === targetDate) {
+        const v = parseVal(obs.value);
+        if (v !== null) return obs;
+      }
+    }
+    return null;
+  };
+
+  const subtractMonths = (dateStr, monthsBack) => {
+    const [y, m, d] = dateStr.split('-').map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d));
+    dt.setUTCMonth(dt.getUTCMonth() - monthsBack);
+    const yyyy = dt.getUTCFullYear();
+    const mm = String(dt.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(dt.getUTCDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  };
+
+  const computeYoY = (observations, monthsBack) => {
+    const latest = latestObservation(observations);
+    if (!latest) return null;
+    const targetDate = subtractMonths(latest.date, monthsBack);
+    const prior = findObservationByDate(observations, targetDate);
+    if (!prior) return null;
+    const latestVal = parseVal(latest.value);
+    const priorVal = parseVal(prior.value);
+    if (latestVal === null || priorVal === null || priorVal === 0) return null;
+    return ((latestVal - priorVal) / priorVal) * 100;
+  };
+
   for(const ind of uniqueAll){
     try{
-      const lim=yoyQuarterly.includes(ind.fred)?8:yoyMonthly.includes(ind.fred)?15:5;
+      const lim=yoyQuarterly.includes(ind.fred)?12:yoyMonthly.includes(ind.fred)?24:8;
       const url=`https://api.stlouisfed.org/fred/series/observations?series_id=${ind.fred}&api_key=${k}&file_type=json&sort_order=desc&limit=${lim}`;
       const data=await fredFetch(url);
       if(!data||!data.observations?.length){errors.push(ind.fred);continue}
       let val;
-      if(yoyMonthly.includes(ind.fred)&&data.observations.length>=13){
-        const la=parseFloat(data.observations[0].value),ya=parseFloat(data.observations[12].value);
-        if(!isNaN(la)&&!isNaN(ya)&&ya!==0)val=((la-ya)/ya)*100;
-      }else if(yoyQuarterly.includes(ind.fred)&&data.observations.length>=5){
-        const la=parseFloat(data.observations[0].value),ya=parseFloat(data.observations[4].value);
-        if(!isNaN(la)&&!isNaN(ya)&&ya!==0)val=((la-ya)/ya)*100;
+      if(yoyMonthly.includes(ind.fred)){
+        val = computeYoY(data.observations, 12);
+      }else if(yoyQuarterly.includes(ind.fred)){
+        val = computeYoY(data.observations, 12);
       }
-      if(val===undefined){for(const o of data.observations){if(o.value&&o.value!=='.'){val=parseFloat(o.value);break}}}
-      if(val!==undefined&&!isNaN(val)){
+      if(val===undefined||val===null){
+        const latest = latestObservation(data.observations);
+        if (latest) val = parseVal(latest.value);
+      }
+      if(val!==undefined&&val!==null&&!isNaN(val)){
         // Apply to all indicators using this FRED series
         const targets=dupeMap[ind.fred]||[ind];
         targets.forEach(t=>{
@@ -1239,11 +1285,25 @@ async function fetchAllFRED(){
       }
     }catch(e){errors.push(ind.fred+': '+e.message);console.warn('Failed:',ind.fred,e)}
   }
+
+  // Derived indicators (no direct FRED series)
+  const derivedUpdates = [];
+  const cpiVal = state.values.cpi;
+  const ueVal = state.values.ue;
+  if (Number.isFinite(cpiVal) && Number.isFinite(ueVal) && state.overrides.misery === undefined) {
+    state.values.misery = Math.round((cpiVal + ueVal) * 100) / 100;
+    dataSources.misery = 'derived';
+    const inp = document.getElementById('in_misery') || document.getElementById('wi_misery');
+    if (inp) inp.value = state.values.misery;
+    derivedUpdates.push('Misery Index (CPI + Unemployment)');
+  }
+
   document.getElementById('loadingOverlay').classList.remove('active');
   renderG();renderI();renderW();save();
 
   // Build detailed result
-  const manualIds=[...G_IND,...I_IND,...W_IND].filter(i=>!i.fred);
+  const derivedIds = new Set(['misery']);
+  const manualIds=[...G_IND,...I_IND,...W_IND].filter(i=>!i.fred && !derivedIds.has(i.id));
   let msg=`✅ FRED Fetch: ${f}/${uniqueAll.length} series fetched successfully.`;
   if(f>0)msg+=`\nConnection: ${activeProxy===0?'Direct FRED API':activeProxy===1?'corsproxy.io proxy':'allorigins.win proxy'}`;
 
@@ -1252,10 +1312,15 @@ async function fetchAllFRED(){
 
   if(errors.length)msg+=`\n⚠ Failed: ${errors.join(', ')}`;
 
+  if(derivedUpdates.length){
+    msg+=`\n\n🧮 Derived indicators:\n`;
+    derivedUpdates.forEach(d=>msg+=`  • ${d}\n`);
+  }
+
   msg+=`\n\n🔴 NOT available via FRED (need manual entry or AI Fetch):\n`;
   manualIds.forEach(m=>msg+=`  • ${m.name}\n`);
 
-  msg+=`\n⚠ Note: Real GDP (A191RL1Q225SBEA) reports QoQ annualized rate, not YoY. Consider manual override with actual YoY value.`;
+  msg+=`\n⚠ Note: Real GDP now uses GDPC1 (real GDP level) to compute YoY.`;
 
   alert(msg);
 }
